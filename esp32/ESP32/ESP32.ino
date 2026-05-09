@@ -13,6 +13,11 @@ String deviceId = "";
 // ================= FIREBASE =================
 #define API_KEY "AIzaSyDHc6pA6rvA6ZyZTjSvTBDzzCd6oHkSVU0"
 #define PROJECT_ID "smart-irrigation-acd3e"
+#define DATABASE_URL "https://smart-irrigation-acd3e-default-rtdb.firebaseio.com/"
+
+
+#define USER_EMAIL "davedccalapis@gmail.com"
+#define USER_PASSWORD "Wapuchi21calapis"
 
 FirebaseData fbdo;
 FirebaseAuth auth;
@@ -36,9 +41,9 @@ bool pumpState = false;
 
 // ================= EEPROM READ =================
 void readCredentials() {
-  char ssidArr[32];
-  char passArr[32];
-  char deviceArr[32];
+  char ssidArr[33];
+  char passArr[33];
+  char deviceArr[33];
 
   for (int i = 0; i < 32; i++) {
     ssidArr[i] = EEPROM.read(i);
@@ -46,15 +51,22 @@ void readCredentials() {
     deviceArr[i] = EEPROM.read(i + 64);
   }
 
+  ssidArr[32] = '\0';
+  passArr[32] = '\0';
+  deviceArr[32] = '\0';
+
   ssid = String(ssidArr);
   password = String(passArr);
   deviceId = String(deviceArr);
+
+  ssid.trim();
+  password.trim();
+  deviceId.trim();
 
   Serial.println("Loaded:");
   Serial.println("SSID: " + ssid);
   Serial.println("DeviceID: " + deviceId);
 }
-
 // ================= EEPROM SAVE =================
 void saveCredentials(String newSSID, String newPASS, String newDevice) {
   for (int i = 0; i < 32; i++) {
@@ -110,11 +122,24 @@ bool connectWiFi() {
 
 // ================= FIREBASE =================
 void initFirebase() {
+
   config.api_key = API_KEY;
-  config.project_id = PROJECT_ID;
+  config.database_url = DATABASE_URL;
+
+  auth.user.email = USER_EMAIL;
+  auth.user.password = USER_PASSWORD;
 
   Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(true);
+
+  Serial.println("Connecting to Firebase...");
+
+  while (!Firebase.ready()) {
+    Serial.print(".");
+    delay(500);
+  }
+
+  Serial.println("\nFirebase Ready!");
 }
 
 // ================= SENSOR =================
@@ -145,7 +170,7 @@ void sendToFirestore() {
   }
 
   float avg = (s1 + s2 + s3 + s4) / 4.0;
-  float moisture = 1.0 - (avg / 4095.0);
+  float moisture = (1.0 - (avg / 4095.0)) * 100;
 
   String json = "{ \"fields\": {";
   json += "\"moisture\": {\"doubleValue\": " + String(moisture) + "},";
@@ -172,6 +197,7 @@ void sendToFirestore() {
 // ================= SETUP =================
 void setup() {
   Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
   EEPROM.begin(EEPROM_SIZE);
 
   pinMode(RELAY_PIN, OUTPUT);
