@@ -27,13 +27,13 @@ FirebaseConfig config;
 WebServer server(80);
 
 // ================= PINS =================
-#define RELAY_PIN 13
+#define RELAY_PIN 26
 #define SOIL1 34
 #define SOIL2 35
 #define SOIL3 32
 #define SOIL4 33
 
-int threshold = 2500;
+int dryValue = 3000;
 
 // ================= VARIABLES =================
 int s1, s2, s3, s4;
@@ -79,11 +79,33 @@ void saveCredentials(String newSSID, String newPASS, String newDevice) {
 
 // ================= AP MODE =================
 void startAP() {
-  WiFi.softAP("Irrigation_Setup");
-  Serial.println("AP Mode Started");
+
+  // IMPORTANT
+  WiFi.disconnect(true);
+  delay(1000);
+
+  // Set AP mode
+  WiFi.mode(WIFI_AP);
+
+  // Start AP with password
+  bool apStarted = WiFi.softAP(
+    "Irrigation_Setup",
+    "12345678"
+  );
+
+  if(apStarted){
+    Serial.println("AP Started");
+    Serial.print("AP IP: ");
+    Serial.println(WiFi.softAPIP());
+  } else {
+    Serial.println("AP Failed!");
+  }
 
   server.on("/setup", []() {
-    if (server.hasArg("ssid") && server.hasArg("pass") && server.hasArg("device")) {
+
+    if (server.hasArg("ssid") &&
+        server.hasArg("pass") &&
+        server.hasArg("device")) {
 
       String newSSID = server.arg("ssid");
       String newPASS = server.arg("pass");
@@ -92,14 +114,18 @@ void startAP() {
       saveCredentials(newSSID, newPASS, newDevice);
 
       server.send(200, "text/plain", "Saved! Restarting...");
+
       delay(2000);
       ESP.restart();
+
     } else {
       server.send(400, "text/plain", "Missing parameters");
     }
   });
 
   server.begin();
+
+  Serial.println("Server Started");
 }
 
 // ================= WIFI =================
@@ -119,12 +145,46 @@ bool connectWiFi() {
   }
   return false;
 }
+// TOKENSTATUS
+void tokenStatusCallback(TokenInfo info) {
+
+  Serial.print("Token Status: ");
+
+  switch (info.status) {
+    case token_status_uninitialized:
+      Serial.println("Uninitialized");
+      break;
+
+    case token_status_on_signing:
+      Serial.println("Signing in...");
+      break;
+
+    case token_status_on_request:
+      Serial.println("Token request in progress");
+      break;
+
+    case token_status_on_refresh:
+      Serial.println("Token refreshing");
+      break;
+
+    case token_status_ready:
+      Serial.println("Ready");
+      break;
+
+    case token_status_error:
+      Serial.println("Token error");
+      Serial.println(info.error.message.c_str());
+      break;
+  }
+}
 
 // ================= FIREBASE =================
 void initFirebase() {
 
   config.api_key = API_KEY;
   config.database_url = DATABASE_URL;
+
+  config.token_status_callback = tokenStatusCallback;
 
   auth.user.email = USER_EMAIL;
   auth.user.password = USER_PASSWORD;
@@ -144,60 +204,80 @@ void initFirebase() {
 
 // ================= SENSOR =================
 void readSoil() {
-  s1 = analogRead(SOIL1);
-  s2 = analogRead(SOIL2);
-  s3 = analogRead(SOIL3);
-  s4 = analogRead(SOIL4);
+   s1 = analogRead(SOIL1);
+   Serial.print("Soil Value: ");
+    Serial.println(s1);
+  // s2 = analogRead(SOIL2);
+  // s3 = analogRead(SOIL3);
+  // s4 = analogRead(SOIL4);
 }
 
 // ================= PUMP CONTROL =================
 void controlPump() {
-  if (s1 > threshold || s2 > threshold || s3 > threshold || s4 > threshold) {
-    digitalWrite(RELAY_PIN, LOW); // ON
-    pumpState = true;
-  } else {
-    digitalWrite(RELAY_PIN, HIGH); // OFF
-    pumpState = false;
+
+  int ON_THRESHOLD = 2800;
+  int OFF_THRESHOLD = 2200;
+
+  // Turn ON when dry
+  if (s1 > ON_THRESHOLD) {
+    digitalWrite(RELAY_PIN, HIGH);
+
+    Serial.println("Pump ON");
+  }
+
+  // Turn OFF when wet
+  if (s1 < OFF_THRESHOLD) {
+    digitalWrite(RELAY_PIN, LOW);
+
+    Serial.println("Pump OFF");
   }
 }
 
 // ================= SEND TO FIRESTORE =================
 void sendToFirestore() {
 
-  if (deviceId == "") {
-    Serial.println("No deviceId set!");
+  if (!Firebase.ready()) {
+    Serial.println("Firebase not ready");
     return;
   }
 
-  float avg = (s1 + s2 + s3 + s4) / 4.0;
-  float moisture = (1.0 - (avg / 4095.0)) * 100;
+  if (deviceId == "") return;
 
-  String json = "{ \"fields\": {";
-  json += "\"moisture\": {\"doubleValue\": " + String(moisture) + "},";
-  json += "\"status\": {\"stringValue\": \"Connected\"}";
-  json += "}}";
+  float moisture = (1.0 - (s1 / 4095.0)) * 100.0;
+  String status = (digitalRead(RELAY_PIN) == LOW) ? "ON" : "OFF";
 
-  String path = "zones/" + deviceId;
+  FirebaseJson content;
 
-  if (Firebase.Firestore.patchDocument(
-        &fbdo,
-        PROJECT_ID,
-        "",
-        path.c_str(),
-        json.c_str(),
-        "moisture,status")) {
+  content.set("fields/deviceId/stringValue", deviceId);
+  content.set("fields/moisture/doubleValue", moisture);
+  content.set("fields/status/stringValue", status);
 
-    Serial.println("Updated Firestore: " + path);
-  } else {
-    Serial.println("Error:");
+  String documentPath = "zones/" + deviceId;
+
+  Serial.println("Sending to Firestore...");
+
+  bool success = Firebase.Firestore.patchDocument(
+    &fbdo,
+    PROJECT_ID,
+    "",
+    documentPath.c_str(),
+    content.raw(),
+    "deviceId,moisture,status"
+  );
+
+  if (success) {
+    Serial.println("Firestore Updated Successfully");
+    Serial.println(fbdo.payload());   // 🔥 ADD THIS
+  }
+  else {
+    Serial.println("Firestore FAILED:");
     Serial.println(fbdo.errorReason());
   }
 }
-
 // ================= SETUP =================
 void setup() {
   Serial.begin(115200);
-  WiFi.mode(WIFI_STA);
+
   EEPROM.begin(EEPROM_SIZE);
 
   pinMode(RELAY_PIN, OUTPUT);
